@@ -2,6 +2,11 @@
 name = "flags-rs"
 version = "0.1.0"
 edition = "2021"
+license = "MIT"
+keywords = ["flags", "feature-flags", "flags-gg"]
+homepage = "https://flags.gg"
+repository = "https://github.com/flags-gg/flags-rs"
+readme = "readme.md"
 
 [dependencies]
 reqwest = { version = "0.11", features = ["json"] }
