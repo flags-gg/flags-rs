@@ -7,6 +7,7 @@ keywords = ["flags", "feature-flags", "flags-gg"]
 homepage = "https://flags.gg"
 repository = "https://github.com/flags-gg/flags-rs"
 readme = "readme.md"
+description = "Rust Library for Flags.gg"
 
 [dependencies]
 reqwest = { version = "0.11", features = ["json"] }
