@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use log::{error, warn};
+use log::__private_api::loc;
 use reqwest::header::{HeaderMap, HeaderValue};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -16,6 +17,7 @@ pub mod flag;
 mod tests;
 
 use crate::cache::{Cache, CacheSystem, MemoryCache};
+use crate::flag::{Details, FeatureFlag};
 
 const BASE_URL: &str = "https://api.flags.gg";
 const MAX_RETRIES: u32 = 3;
@@ -91,8 +93,19 @@ impl Client {
 
     pub async fn list(&self) -> Result<Vec<flag::FeatureFlag>, FlagError> {
         let cache = self.cache.read().unwrap();
-        let flags = cache.get_all().await
+        let mut flags = cache.get_all().await
             .map_err(|e| FlagError::CacheError(e.to_string()))?;
+        
+        let local_flags = build_local();
+        for (flag, enabled) in local_flags {
+            flags.push(FeatureFlag {
+                enabled,
+                details: Details {
+                    name: flag.to_string(),
+                    id: format!("local_flag-{}", flag),
+                },
+            })
+        }
         Ok(flags)
     }
 
