@@ -92,21 +92,21 @@ impl Client {
     }
 
     pub async fn list(&self) -> Result<Vec<flag::FeatureFlag>, FlagError> {
-        let cache = self.cache.read().unwrap();
-        let mut flags = cache.get_all().await
-            .map_err(|e| FlagError::CacheError(e.to_string()))?;
-        
-        let local_flags = build_local();
-        for (flag, enabled) in local_flags {
-            flags.push(FeatureFlag {
-                enabled,
-                details: Details {
-                    name: flag.to_string(),
-                    id: format!("local_flag-{}", flag),
-                },
-            })
+        // Check if cache needs refresh before listing
+        {
+            let cache = self.cache.read().unwrap();
+            if cache.should_refresh_cache().await {
+                drop(cache); // Release the read lock before acquiring write lock
+                if let Err(e) = self.refetch().await {
+                    error!("Failed to refetch flags for list: {}", e);
+                    // Continue with potentially stale cache data if refetch fails
+                }
+            }
         }
-        Ok(flags)
+
+        let cache = self.cache.read().unwrap();
+        cache.get_all().await
+            .map_err(|e| FlagError::CacheError(e.to_string()))
     }
 
     async fn is_enabled(&self, name: &str) -> bool {
@@ -119,18 +119,12 @@ impl Client {
                 drop(cache); // Release the read lock before acquiring write lock
                 if let Err(e) = self.refetch().await {
                     error!("Failed to refetch flags: {}", e);
-                    return false;
+                    // If refetch fails, continue to check the potentially stale cache.
                 }
             }
         }
 
-        // Check local environment variables first
-        let local_flags = build_local();
-        if let Some(&enabled) = local_flags.get(&name) {
-            return enabled;
-        }
-
-        // Check cache
+        // Check cache (which now contains combined API and local flags with overrides)
         let cache = self.cache.read().unwrap();
         match cache.get(&name).await {
             Ok((enabled, exists)) => {
@@ -140,7 +134,7 @@ impl Client {
                     false
                 }
             }
-            Err(_) => false,
+            Err(_) => false, // Treat cache errors as flag not found
         }
     }
 
@@ -192,49 +186,47 @@ impl Client {
         if circuit_state.is_open {
             if let Some(last_failure) = circuit_state.last_failure {
                 let now = Utc::now();
-                if (now - last_failure).num_seconds() < 10 {
+                // Keep the circuit open for a bit after failure
+                if (now - last_failure).num_seconds() < 10 { // You can adjust this duration
+                    warn!("Circuit breaker is open, skipping refetch.");
                     return Ok(());
                 }
             }
+            // If enough time has passed, attempt to close the circuit
+            warn!("Attempting to close circuit breaker.");
             circuit_state.is_open = false;
             circuit_state.failure_count = 0;
         }
-        drop(circuit_state);
+        drop(circuit_state); // Release the write lock
 
-        let mut api_resp = None;
-        let mut last_error = None;
-
-        for retry in 0..self.max_retries {
-            match self.fetch_flags().await {
-                Ok(resp) => {
-                    api_resp = Some(resp);
-                    let mut circuit_state = self.circuit_state.write().unwrap();
-                    circuit_state.failure_count = 0;
-                    break;
-                }
-                Err(e) => {
-                    last_error = Some(e);
-                    let mut circuit_state = self.circuit_state.write().unwrap();
-                    circuit_state.failure_count += 1;
-
-                    if circuit_state.failure_count >= self.max_retries {
-                        circuit_state.is_open = true;
-                        circuit_state.last_failure = Some(Utc::now());
-                        return Ok(());
-                    }
-                    drop(circuit_state);
-
-                    tokio::time::sleep(Duration::from_secs((retry + 1) as u64)).await;
-                }
+        let api_resp = match self.fetch_flags().await {
+            Ok(resp) => {
+                let mut circuit_state = self.circuit_state.write().unwrap();
+                circuit_state.failure_count = 0; // Reset failure count on success
+                resp
             }
-        }
-
-        let api_resp = match api_resp {
-            Some(resp) => resp,
-            None => return Err(last_error.unwrap()),
+            Err(e) => {
+                let mut circuit_state = self.circuit_state.write().unwrap();
+                circuit_state.failure_count += 1;
+                circuit_state.last_failure = Some(Utc::now());
+                if circuit_state.failure_count >= self.max_retries {
+                    circuit_state.is_open = true;
+                    error!("Refetch failed after {} retries, opening circuit breaker: {}", self.max_retries, e);
+                } else {
+                    warn!("Refetch failed (attempt {}/{}), retrying: {}", circuit_state.failure_count, self.max_retries, e);
+                }
+                drop(circuit_state); // Release the write lock
+                // If fetching fails, we should still attempt to use local flags and potentially old cache data
+                let local_flags = build_local(); // Build local flags even on API failure
+                let mut cache = self.cache.write().unwrap();
+                // Attempt to refresh cache with only local flags if API failed
+                cache.refresh(&local_flags, 60).await // Use a default interval if API interval is not available
+                    .map_err(|e| FlagError::CacheError(e.to_string()))?;
+                return Err(e); // Propagate the error
+            }
         };
 
-        let flags: Vec<flag::FeatureFlag> = api_resp.flags
+        let mut api_flags: Vec<flag::FeatureFlag> = api_resp.flags
             .into_iter()
             .map(|f| flag::FeatureFlag {
                 enabled: f.enabled,
@@ -245,8 +237,28 @@ impl Client {
             })
             .collect();
 
+        let local_flags = build_local();
+
+        // Combine API flags and local flags, with local overriding API
+        let mut combined_flags = Vec::new();
+        let mut local_flags_map: HashMap<String, FeatureFlag> = local_flags.into_iter().map(|f| (f.details.name.clone(), f)).collect();
+
+        for api_flag in api_flags.drain(..) {
+            if let Some(local_flag) = local_flags_map.remove(&api_flag.details.name) {
+                // Local flag with the same name exists, use the local one
+                combined_flags.push(local_flag);
+            } else {
+                // No local flag with the same name, use the API one
+                combined_flags.push(api_flag);
+            }
+        }
+
+        // Add any remaining local flags that didn't have a corresponding API flag
+        combined_flags.extend(local_flags_map.into_values());
+
+
         let mut cache = self.cache.write().unwrap();
-        cache.refresh(&flags, api_resp.interval_allowed).await
+        cache.refresh(&combined_flags, api_resp.interval_allowed).await
             .map_err(|e| FlagError::CacheError(e.to_string()))?;
 
         Ok(())
@@ -339,8 +351,8 @@ impl ClientBuilder {
     }
 }
 
-fn build_local() -> HashMap<String, bool> {
-    let mut result = HashMap::new();
+fn build_local() -> Vec<FeatureFlag> {
+    let mut result = Vec::new();
 
     for (key, value) in env::vars() {
         if !key.starts_with("FLAGS_") {
@@ -348,12 +360,43 @@ fn build_local() -> HashMap<String, bool> {
         }
 
         let enabled = value == "true";
-        let key_lower = key.trim_start_matches("FLAGS_").to_lowercase();
+        let flag_name_env = key.trim_start_matches("FLAGS_").to_string();
+        let flag_name_lower = flag_name_env.to_lowercase();
 
-        result.insert(key_lower.clone(), enabled);
-        result.insert(key_lower.replace('_', "-"), enabled);
-        result.insert(key_lower.replace('_', " "), enabled);
+        // Create a FeatureFlag for the flag name as it appears in the environment variable (lowercase)
+        result.push(FeatureFlag {
+            enabled,
+            details: Details {
+                name: flag_name_lower.clone(),
+                id: format!("local_{}", flag_name_lower), // Using a simple identifier for local flags
+            },
+        });
+
+        // Optionally, create FeatureFlags for common variations (hyphens and spaces)
+        if flag_name_lower.contains('_') {
+            let flag_name_hyphenated = flag_name_lower.replace('_', "-");
+            result.push(FeatureFlag {
+                enabled,
+                details: Details {
+                    name: flag_name_hyphenated.clone(),
+                    id: format!("local_{}", flag_name_hyphenated),
+                },
+            });
+        }
+
+        if flag_name_lower.contains('_') || flag_name_lower.contains('-') {
+            let flag_name_spaced = flag_name_lower.replace('_', " ").replace('-', " ");
+            result.push(FeatureFlag {
+                enabled,
+                details: Details {
+                    name: flag_name_spaced.clone(),
+                    id: format!("local_{}", flag_name_spaced),
+                },
+            });
+        }
+
     }
 
     result
 }
+
