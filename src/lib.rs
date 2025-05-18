@@ -68,7 +68,7 @@ pub struct Client {
     http_client: reqwest::Client,
     cache: Arc<RwLock<Box<dyn Cache + Send + Sync>>>,
     max_retries: u32,
-    circuit_state: RwLock<CircuitState>,
+    circuit_state: Arc<RwLock<CircuitState>>,
     auth: Option<Auth>,
 }
 
@@ -272,11 +272,7 @@ impl Clone for Client {
             http_client: self.http_client.clone(),
             cache: Arc::clone(&self.cache),
             max_retries: self.max_retries,
-            circuit_state: RwLock::new(CircuitState{
-                is_open: self.circuit_state.blocking_read().is_open,
-                failure_count: self.circuit_state.blocking_read().failure_count,
-                last_failure: self.circuit_state.blocking_read().last_failure,
-            }),
+            circuit_state: Arc::clone(&self.circuit_state),
             auth: self.auth.clone(),
         }
     }
@@ -358,11 +354,11 @@ impl ClientBuilder {
                 .unwrap(),
             cache: Arc::new(RwLock::new(cache)),
             max_retries: self.max_retries,
-            circuit_state: RwLock::new(CircuitState {
+            circuit_state: Arc::new(RwLock::new(CircuitState {
                 is_open: false,
                 failure_count: 0,
                 last_failure: None,
-            }),
+            })),
             auth: self.auth,
         }
     }

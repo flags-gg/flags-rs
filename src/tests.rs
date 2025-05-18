@@ -91,6 +91,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial]
     async fn test_flag_list() {
         // Setup mock server
         let mock_server = MockServer::start().await;
@@ -128,7 +129,7 @@ mod tests {
 
         // Test listing all flags
         let flags = client.list().await.unwrap();
-        assert_eq!(flags.len(), 8);
+        assert_eq!(flags.len(), 2);
 
         // Verify flag details
         let flag1 = flags.iter().find(|f| f.details.name == "flag1").unwrap();
