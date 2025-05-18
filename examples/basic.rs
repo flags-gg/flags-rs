@@ -1,4 +1,3 @@
-// examples/basic.rs
 use flags_rs::{Auth, Client};
 
 #[tokio::main]

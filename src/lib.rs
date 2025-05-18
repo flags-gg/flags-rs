@@ -1,7 +1,7 @@
-// src/lib.rs
 use std::collections::HashMap;
 use std::env;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
+use tokio::sync::RwLock;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
@@ -94,7 +94,7 @@ impl Client {
     pub async fn list(&self) -> Result<Vec<flag::FeatureFlag>, FlagError> {
         // Check if cache needs refresh before listing
         {
-            let cache = self.cache.read().unwrap();
+            let cache = self.cache.read().await;
             if cache.should_refresh_cache().await {
                 drop(cache); // Release the read lock before acquiring write lock
                 if let Err(e) = self.refetch().await {
@@ -104,7 +104,7 @@ impl Client {
             }
         }
 
-        let cache = self.cache.read().unwrap();
+        let cache = self.cache.read().await;
         cache.get_all().await
             .map_err(|e| FlagError::CacheError(e.to_string()))
     }
@@ -114,7 +114,7 @@ impl Client {
 
         // Check if cache needs refresh
         {
-            let cache = self.cache.read().unwrap();
+            let cache = self.cache.read().await;
             if cache.should_refresh_cache().await {
                 drop(cache); // Release the read lock before acquiring write lock
                 if let Err(e) = self.refetch().await {
@@ -125,7 +125,7 @@ impl Client {
         }
 
         // Check cache (which now contains combined API and local flags with overrides)
-        let cache = self.cache.read().unwrap();
+        let cache = self.cache.read().await;
         match cache.get(&name).await {
             Ok((enabled, exists)) => {
                 if exists {
@@ -181,7 +181,7 @@ impl Client {
     }
 
     async fn refetch(&self) -> Result<(), FlagError> {
-        let mut circuit_state = self.circuit_state.write().unwrap();
+        let mut circuit_state = self.circuit_state.write().await;
 
         if circuit_state.is_open {
             if let Some(last_failure) = circuit_state.last_failure {
@@ -201,12 +201,12 @@ impl Client {
 
         let api_resp = match self.fetch_flags().await {
             Ok(resp) => {
-                let mut circuit_state = self.circuit_state.write().unwrap();
+                let mut circuit_state = self.circuit_state.write().await;
                 circuit_state.failure_count = 0; // Reset failure count on success
                 resp
             }
             Err(e) => {
-                let mut circuit_state = self.circuit_state.write().unwrap();
+                let mut circuit_state = self.circuit_state.write().await;
                 circuit_state.failure_count += 1;
                 circuit_state.last_failure = Some(Utc::now());
                 if circuit_state.failure_count >= self.max_retries {
@@ -218,7 +218,7 @@ impl Client {
                 drop(circuit_state); // Release the write lock
                 // If fetching fails, we should still attempt to use local flags and potentially old cache data
                 let local_flags = build_local(); // Build local flags even on API failure
-                let mut cache = self.cache.write().unwrap();
+                let mut cache = self.cache.write().await;
                 // Attempt to refresh cache with only local flags if API failed
                 cache.refresh(&local_flags, 60).await // Use a default interval if API interval is not available
                     .map_err(|e| FlagError::CacheError(e.to_string()))?;
@@ -257,11 +257,28 @@ impl Client {
         combined_flags.extend(local_flags_map.into_values());
 
 
-        let mut cache = self.cache.write().unwrap();
+        let mut cache = self.cache.write().await;
         cache.refresh(&combined_flags, api_resp.interval_allowed).await
             .map_err(|e| FlagError::CacheError(e.to_string()))?;
 
         Ok(())
+    }
+}
+
+impl Clone for Client {
+    fn clone(&self) -> Self {
+        Client {
+            base_url: self.base_url.clone(),
+            http_client: self.http_client.clone(),
+            cache: Arc::clone(&self.cache),
+            max_retries: self.max_retries,
+            circuit_state: RwLock::new(CircuitState{
+                is_open: self.circuit_state.blocking_read().is_open,
+                failure_count: self.circuit_state.blocking_read().failure_count,
+                last_failure: self.circuit_state.blocking_read().last_failure,
+            }),
+            auth: self.auth.clone(),
+        }
     }
 }
 

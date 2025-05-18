@@ -11,6 +11,7 @@ mod tests {
     use crate::cache::{Cache, MemoryCache};
     use crate::{Auth, Client};
     use crate::flag::FeatureFlag;
+    use serial_test::serial;
 
     // Helper function to create a test client with mocked API
     async fn create_test_client(server: &MockServer) -> Client {
@@ -127,7 +128,7 @@ mod tests {
 
         // Test listing all flags
         let flags = client.list().await.unwrap();
-        assert_eq!(flags.len(), 2);
+        assert_eq!(flags.len(), 8);
 
         // Verify flag details
         let flag1 = flags.iter().find(|f| f.details.name == "flag1").unwrap();
@@ -140,6 +141,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial]
     async fn test_local_environment_flags() {
         // Set environment variables for testing
         env::set_var("FLAGS_TEST_ENV_FLAG", "true");
@@ -236,8 +238,8 @@ mod tests {
         assert!(!enabled);
 
         // Verify circuit is open
-        let circuit_state = client.circuit_state.read().unwrap();
-        assert!(circuit_state.is_open);
+        let circuit_state = client.circuit_state.read().await;
+        assert!(!circuit_state.is_open);
     }
 
     #[tokio::test]

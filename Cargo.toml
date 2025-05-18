@@ -18,11 +18,11 @@ log = "0.4"
 rusqlite = { version = "0.28.0", features = ["bundled"], optional = true }
 async-trait = "0.1"
 chrono = "0.4"
-mockito = "1.7.0"
 serde_json = "1.0.140"
 
 [dev-dependencies]
 mockito = "1.7.0"
 tempfile = "3.20.0"
-tokio = { version = "1", features = ["full", "test-util"] }
+tokio = { version = "1", features = ["full", "test-util", "sync"] }
 wiremock = "0.6.3"
+serial_test = "3.2.0"
