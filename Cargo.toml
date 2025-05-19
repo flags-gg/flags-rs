@@ -13,7 +13,7 @@ description = "Rust Library for Flags.gg"
 reqwest = { version = "0.11", features = ["json"] }
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1.0", features = ["derive"] }
-thiserror = "1.0"
+thiserror = "2.0"
 log = "0.4"
 rusqlite = { version = "0.28.0", features = ["bundled"], optional = true }
 async-trait = "0.1"
