@@ -53,6 +53,9 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
   release:
+    needs:
+      - test
+      - release-pr
     name: Release
     runs-on: ubuntu-latest
     steps:
