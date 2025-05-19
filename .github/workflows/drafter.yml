@@ -8,19 +8,29 @@ permissions:
   pull-requests: write
   contents: write
 
+env:
+  CARGO_TERM_COLOR: always
+
 jobs:
-  qodana:
+  test:
+    name: Test
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
-      pull-requests: write
-      checks: write
     steps:
       - uses: actions/checkout@v4
-        with:
-          persist-credentials: false
-          ref: ${{ github.event.pull_request.head.sha }}  # to check out the actual pull request commit, not the merge commit
-          fetch-depth: 0  # a full history is required for pull request analysis
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo test --all-features
+#  qodana:
+#    runs-on: ubuntu-latest
+#    permissions:
+#      contents: write
+#      pull-requests: write
+#      checks: write
+#    steps:
+#      - uses: actions/checkout@v4
+#        with:
+#          persist-credentials: false
+#          ref: ${{ github.event.pull_request.head.sha }}  # to check out the actual pull request commit, not the merge commit
+#          fetch-depth: 0  # a full history is required for pull request analysis
 #      - name: 'Qodana Scan'
 #        uses: JetBrains/qodana-action@v2025.1
 #        env:
@@ -28,6 +38,13 @@ jobs:
 #          QODANA_ENDPOINT: 'https://qodana.cloud'
 #        with:
 #          pr-mode: false
+  release-plz:
+    runs-on: ubuntu-latest
+    needs:
+      - test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
       - name: Run release-plz
         uses: release-plz/action@v0.5
         with:
