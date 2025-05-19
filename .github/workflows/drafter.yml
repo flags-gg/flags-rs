@@ -21,13 +21,13 @@ jobs:
           persist-credentials: false
           ref: ${{ github.event.pull_request.head.sha }}  # to check out the actual pull request commit, not the merge commit
           fetch-depth: 0  # a full history is required for pull request analysis
-      - name: 'Qodana Scan'
-        uses: JetBrains/qodana-action@v2025.1
-        env:
-          QODANA_TOKEN: ${{ secrets.QODANA_TOKEN_1031901934 }}
-          QODANA_ENDPOINT: 'https://qodana.cloud'
-        with:
-          pr-mode: false
+#      - name: 'Qodana Scan'
+#        uses: JetBrains/qodana-action@v2025.1
+#        env:
+#          QODANA_TOKEN: ${{ secrets.QODANA_TOKEN_1031901934 }}
+#          QODANA_ENDPOINT: 'https://qodana.cloud'
+#        with:
+#          pr-mode: false
       - name: Run release-plz
         uses: release-plz/action@v0.5
         with:
