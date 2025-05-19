@@ -64,6 +64,7 @@ impl Cache for MemoryCache {
     async fn refresh(&mut self, flags: &[FeatureFlag], interval_allowed: i32) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let mut flag_map = self.flags.write().await;
         flag_map.clear();
+        println!("cache refershed for flags.gg - {}", Utc::now());
 
         for flag in flags {
             flag_map.insert(flag.details.name.clone(), flag.clone());

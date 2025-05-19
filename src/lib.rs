@@ -329,22 +329,7 @@ impl ClientBuilder {
     }
 
     pub fn build(self) -> Client {
-        let cache: Box<dyn Cache + Send + Sync> = if self.use_memory_cache {
-            Box::new(MemoryCache::new())
-        } else {
-            #[cfg(feature = "rusqlite")]
-            {
-                if let Some(file_name) = self.file_name {
-                    Box::new(cache::SqliteCache::new(&file_name))
-                } else {
-                    Box::new(MemoryCache::new())
-                }
-            }
-            #[cfg(not(feature = "rusqlite"))]
-            {
-                Box::new(MemoryCache::new())
-            }
-        };
+        let cache: Box<dyn Cache + Send + Sync> = Box::new(MemoryCache::new());
 
         Client {
             base_url: self.base_url,
