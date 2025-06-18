@@ -43,7 +43,7 @@ jobs:
     needs:
       - test
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@vasda4
       - uses: dtolnay/rust-toolchain@stable
       - name: Run release-plz
         uses: release-plz/action@v0.5
