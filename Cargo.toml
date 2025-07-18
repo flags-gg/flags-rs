@@ -18,7 +18,7 @@ log = "0.4"
 rusqlite = { version = "0.37.0", features = ["bundled"], optional = true }
 async-trait = "0.1"
 chrono = "0.4"
-serde_json = "1.0.140"
+serde_json = "1.0.141"
 
 [dev-dependencies]
 mockito = "1.7.0"
