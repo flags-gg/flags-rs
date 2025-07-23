@@ -23,6 +23,7 @@ mod tests {
             })
             .with_memory_cache()
             .build()
+            .expect("Failed to build test client")
     }
 
     #[tokio::test]
@@ -36,7 +37,8 @@ mod tests {
                 environment_id: "test-env".to_string(),
             })
             .with_memory_cache()
-            .build();
+            .build()
+            .expect("Failed to build client");
 
         assert_eq!(client.base_url, "https://test-api.example.com");
         assert_eq!(client.max_retries, 5);

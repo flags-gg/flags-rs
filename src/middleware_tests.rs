@@ -22,6 +22,7 @@ mod tests {
                 environment_id: "test-env".to_string(),
             })
             .build()
+            .expect("Failed to build test client")
     }
 
     #[tokio::test]
@@ -167,7 +168,8 @@ mod tests {
                 agent_id: "test-agent".to_string(),
                 environment_id: "test-env".to_string(),
             })
-            .build();
+            .build()
+            .expect("Failed to build test client");
 
         let service = ServiceBuilder::new()
             .layer(FlagsLayer::new(client))

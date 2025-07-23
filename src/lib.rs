@@ -53,6 +53,9 @@ pub enum FlagError {
 
     #[error("API error: {0}")]
     ApiError(String),
+    
+    #[error("Builder error: {0}")]
+    BuilderError(String),
 }
 
 #[derive(Debug)]
@@ -164,9 +167,12 @@ impl Client {
         headers.insert("User-Agent", HeaderValue::from_static("Flags-Rust"));
         headers.insert("Accept", HeaderValue::from_static("application/json"));
         headers.insert("Content-Type", HeaderValue::from_static("application/json"));
-        headers.insert("X-Project-ID", HeaderValue::from_str(&auth.project_id).unwrap());
-        headers.insert("X-Agent-ID", HeaderValue::from_str(&auth.agent_id).unwrap());
-        headers.insert("X-Environment-ID", HeaderValue::from_str(&auth.environment_id).unwrap());
+        headers.insert("X-Project-ID", HeaderValue::from_str(&auth.project_id)
+            .map_err(|_| FlagError::AuthError(format!("Invalid project ID: {}", auth.project_id)))?);
+        headers.insert("X-Agent-ID", HeaderValue::from_str(&auth.agent_id)
+            .map_err(|_| FlagError::AuthError(format!("Invalid agent ID: {}", auth.agent_id)))?);
+        headers.insert("X-Environment-ID", HeaderValue::from_str(&auth.environment_id)
+            .map_err(|_| FlagError::AuthError(format!("Invalid environment ID: {}", auth.environment_id)))?);
 
         let url = format!("{}/flags", self.base_url);
         let response = self.http_client
@@ -334,15 +340,17 @@ impl ClientBuilder {
         self
     }
 
-    pub fn build(self) -> Client {
+    pub fn build(self) -> Result<Client, FlagError> {
         let cache: Box<dyn Cache + Send + Sync> = Box::new(MemoryCache::new());
 
-        Client {
+        let http_client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(10))
+            .build()
+            .map_err(|e| FlagError::BuilderError(format!("Failed to build HTTP client: {}", e)))?;
+
+        Ok(Client {
             base_url: self.base_url,
-            http_client: reqwest::Client::builder()
-                .timeout(Duration::from_secs(10))
-                .build()
-                .unwrap(),
+            http_client,
             cache: Arc::new(RwLock::new(cache)),
             max_retries: self.max_retries,
             circuit_state: Arc::new(RwLock::new(CircuitState {
@@ -351,7 +359,7 @@ impl ClientBuilder {
                 last_failure: None,
             })),
             auth: self.auth,
-        }
+        })
     }
 }
 

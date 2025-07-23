@@ -10,7 +10,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             environment_id: "your-environment-id".to_string(),
         })
         .with_memory_cache()
-        .build();
+        .build()?;
 
     // Check if a flag is enabled
     let is_feature_enabled = client.is("my-feature").enabled().await;
