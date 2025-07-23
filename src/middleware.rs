@@ -1,7 +1,6 @@
 use crate::{Client, FlagError};
 use futures::future::BoxFuture;
 use http::{Request, Response};
-use http_body_util::BodyExt;
 use pin_project::pin_project;
 use std::future::Future;
 use std::pin::Pin;

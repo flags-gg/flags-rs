@@ -2,9 +2,9 @@
 mod tests {
     use crate::{Client, middleware::{FlagsLayer, RequestExt}};
     use http::{Request, Response, StatusCode};
-    use http_body_util::{BodyExt, Empty, Full};
+    use http_body_util::{Empty, Full};
     use std::convert::Infallible;
-    use tower::{Service, ServiceBuilder, ServiceExt};
+    use tower::{ServiceBuilder, ServiceExt};
     use wiremock::{MockServer, Mock, ResponseTemplate};
     use wiremock::matchers::{method, path, header};
     use bytes::Bytes;

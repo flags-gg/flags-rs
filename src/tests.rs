@@ -245,6 +245,87 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_batch_operations() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/flags"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "intervalAllowed": 60,
+                "flags": [
+                    {
+                        "enabled": true,
+                        "details": {
+                            "name": "feature-a",
+                            "id": "1"
+                        }
+                    },
+                    {
+                        "enabled": false,
+                        "details": {
+                            "name": "feature-b",
+                            "id": "2"
+                        }
+                    },
+                    {
+                        "enabled": true,
+                        "details": {
+                            "name": "feature-c",
+                            "id": "3"
+                        }
+                    }
+                ]
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let client = create_test_client(&mock_server).await;
+
+        // Test get_multiple
+        let flags = client.get_multiple(&["feature-a", "feature-b", "feature-c", "feature-d"]).await;
+        assert_eq!(flags.get("feature-a"), Some(&true));
+        assert_eq!(flags.get("feature-b"), Some(&false));
+        assert_eq!(flags.get("feature-c"), Some(&true));
+        assert_eq!(flags.get("feature-d"), Some(&false)); // Non-existent flag
+
+        // Test all_enabled
+        assert!(client.all_enabled(&["feature-a", "feature-c"]).await); // Both are enabled
+        assert!(!client.all_enabled(&["feature-a", "feature-b"]).await); // Not all are enabled (b is false)
+
+        // Test any_enabled
+        assert!(client.any_enabled(&["feature-a", "feature-b"]).await); // At least one is enabled
+        assert!(!client.any_enabled(&["feature-b", "feature-d"]).await); // None are enabled
+    }
+
+    #[tokio::test]
+    async fn test_error_callback() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+
+        let error_count = Arc::new(AtomicUsize::new(0));
+        let error_count_clone = Arc::clone(&error_count);
+
+        let client = Client::builder()
+            .with_base_url("http://invalid-url-that-will-fail")
+            .with_auth(Auth {
+                project_id: "test-project".to_string(),
+                agent_id: "test-agent".to_string(),
+                environment_id: "test-env".to_string(),
+            })
+            .with_error_callback(move |_error| {
+                error_count_clone.fetch_add(1, Ordering::SeqCst);
+            })
+            .build()
+            .expect("Failed to build client");
+
+        // This should trigger an error and the callback
+        let _ = client.is("test-flag").enabled().await;
+
+        // Check that the error callback was called
+        assert!(error_count.load(Ordering::SeqCst) > 0);
+    }
+
+    #[tokio::test]
     async fn test_memory_cache() {
         let mut cache = MemoryCache::new();
 
