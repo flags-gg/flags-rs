@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::sync::Mutex;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -15,15 +14,6 @@ pub trait Cache {
     async fn init(&mut self) -> Result<(), Box<dyn std::error::Error + Send + Sync>>;
 }
 
-pub struct CacheSystem {
-    cache: Box<dyn Cache + Send + Sync>,
-}
-
-impl CacheSystem {
-    pub fn new(cache: Box<dyn Cache + Send + Sync>) -> Self {
-        Self { cache }
-    }
-}
 
 pub struct MemoryCache {
     flags: RwLock<HashMap<String, FeatureFlag>>,
@@ -64,7 +54,7 @@ impl Cache for MemoryCache {
     async fn refresh(&mut self, flags: &[FeatureFlag], interval_allowed: i32) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let mut flag_map = self.flags.write().await;
         flag_map.clear();
-        println!("cache refershed for flags.gg - {}", Utc::now());
+        log::debug!("Cache refreshed for flags.gg - {}", Utc::now());
 
         for flag in flags {
             flag_map.insert(flag.details.name.clone(), flag.clone());

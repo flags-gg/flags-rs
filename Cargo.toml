@@ -1,6 +1,6 @@
 [package]
 name = "flags-rs"
-version = "0.1.5"
+version = "0.1.7"
 edition = "2021"
 license = "MIT"
 keywords = ["flags", "feature-flags", "flags-gg"]

@@ -2,9 +2,9 @@
 mod tests {
     use crate::{Client, middleware::{FlagsLayer, RequestExt}};
     use http::{Request, Response, StatusCode};
-    use http_body_util::{BodyExt, Empty, Full};
+    use http_body_util::{Empty, Full};
     use std::convert::Infallible;
-    use tower::{Service, ServiceBuilder, ServiceExt};
+    use tower::{ServiceBuilder, ServiceExt};
     use wiremock::{MockServer, Mock, ResponseTemplate};
     use wiremock::matchers::{method, path, header};
     use bytes::Bytes;
@@ -22,6 +22,7 @@ mod tests {
                 environment_id: "test-env".to_string(),
             })
             .build()
+            .expect("Failed to build test client")
     }
 
     #[tokio::test]
@@ -167,7 +168,8 @@ mod tests {
                 agent_id: "test-agent".to_string(),
                 environment_id: "test-env".to_string(),
             })
-            .build();
+            .build()
+            .expect("Failed to build test client");
 
         let service = ServiceBuilder::new()
             .layer(FlagsLayer::new(client))

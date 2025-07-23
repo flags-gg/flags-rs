@@ -1,7 +1,6 @@
 use crate::{Client, FlagError};
 use futures::future::BoxFuture;
 use http::{Request, Response};
-use http_body_util::BodyExt;
 use pin_project::pin_project;
 use std::future::Future;
 use std::pin::Pin;
@@ -133,10 +132,14 @@ where
                     match this.inner.poll(cx) {
                         Poll::Ready(Ok(mut response)) => {
                             if !enabled_flags.is_empty() {
-                                response.headers_mut().insert(
-                                    "X-Enabled-Flags",
-                                    enabled_flags.join(",").parse().unwrap(),
-                                );
+                                // Only add header if we can create a valid HeaderValue
+                                if let Ok(header_value) = enabled_flags.join(",").parse() {
+                                    response.headers_mut().insert(
+                                        "X-Enabled-Flags",
+                                        header_value,
+                                    );
+                                }
+                                // If parsing fails, we still return the response without the header
                             }
                             Poll::Ready(Ok(response))
                         }

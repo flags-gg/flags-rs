@@ -25,7 +25,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let client = Client::builder()
         .with_auth(auth)
-        .build();
+        .build()
+        .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
 
     let flags_layer = FlagsLayer::new(client)
         .with_header_name("X-Feature-Flags");
@@ -52,8 +53,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         environment_id: std::env::var("FLAGS_ENVIRONMENT_ID").unwrap_or_else(|_| "development".to_string()),
     };
     
+    let client2 = Client::builder()
+        .with_auth(auth2)
+        .build()
+        .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
+    
     let service = ServiceBuilder::new()
-        .layer(FlagsLayer::new(Client::builder().with_auth(auth2).build()))
+        .layer(FlagsLayer::new(client2))
         .service_fn(handle_request_with_flag_check);
 
     let request = Request::builder()
@@ -75,7 +81,7 @@ async fn handle_request<B>(_req: Request<B>) -> Result<Response<Full<Bytes>>, In
     Ok(Response::builder()
         .status(StatusCode::OK)
         .body(Full::new("Hello from the service!".into()))
-        .unwrap())
+        .expect("Failed to build response"))
 }
 
 #[cfg(feature = "tower-middleware")]
@@ -85,17 +91,17 @@ async fn handle_request_with_flag_check<B>(req: Request<B>) -> Result<Response<F
             Ok(Response::builder()
                 .status(StatusCode::OK)
                 .body(Full::new("Premium features are enabled!".into()))
-                .unwrap())
+                .expect("Failed to build response"))
         } else {
             Ok(Response::builder()
                 .status(StatusCode::FORBIDDEN)
                 .body(Full::new("Premium features are not enabled".into()))
-                .unwrap())
+                .expect("Failed to build response"))
         }
     } else {
         Ok(Response::builder()
             .status(StatusCode::INTERNAL_SERVER_ERROR)
             .body(Full::new("Flags client not available".into()))
-            .unwrap())
+            .expect("Failed to build response"))
     }
 }

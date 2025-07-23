@@ -1,15 +1,14 @@
 use std::collections::HashMap;
 use std::env;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::RwLock;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
-use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use log::{error, warn};
-use log::__private_api::loc;
 use reqwest::header::{HeaderMap, HeaderValue};
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use thiserror::Error;
 
 pub mod cache;
@@ -22,7 +21,7 @@ pub mod middleware;
 #[cfg(all(test, feature = "tower-middleware"))]
 mod middleware_tests;
 
-use crate::cache::{Cache, CacheSystem, MemoryCache};
+use crate::cache::{Cache, MemoryCache};
 use crate::flag::{Details, FeatureFlag};
 
 const BASE_URL: &str = "https://api.flags.gg";
@@ -53,6 +52,9 @@ pub enum FlagError {
 
     #[error("API error: {0}")]
     ApiError(String),
+    
+    #[error("Builder error: {0}")]
+    BuilderError(String),
 }
 
 #[derive(Debug)]
@@ -69,6 +71,8 @@ struct ApiResponse {
     flags: Vec<flag::FeatureFlag>,
 }
 
+pub type ErrorCallback = Arc<dyn Fn(&FlagError) + Send + Sync>;
+
 pub struct Client {
     base_url: String,
     http_client: reqwest::Client,
@@ -76,11 +80,19 @@ pub struct Client {
     max_retries: u32,
     circuit_state: Arc<RwLock<CircuitState>>,
     auth: Option<Auth>,
+    refresh_in_progress: Arc<AtomicBool>,
+    error_callback: Option<ErrorCallback>,
 }
 
 impl Client {
     pub fn builder() -> ClientBuilder {
         ClientBuilder::new()
+    }
+    
+    fn handle_error(&self, error: &FlagError) {
+        if let Some(ref callback) = self.error_callback {
+            callback(error);
+        }
     }
 
     pub fn debug_info(&self) -> String {
@@ -96,18 +108,116 @@ impl Client {
             client: self,
         }
     }
-
-    pub async fn list(&self) -> Result<Vec<flag::FeatureFlag>, FlagError> {
-        // Check if cache needs refresh before listing
-        {
-            let cache = self.cache.read().await;
-            if cache.should_refresh_cache().await {
-                drop(cache); // Release the read lock before acquiring write lock
+    
+    /// Get the enabled status of multiple flags at once.
+    /// This is more efficient than checking flags individually as it only
+    /// requires a single cache lock and potential refresh.
+    /// 
+    /// # Example
+    /// ```no_run
+    /// # use flags_rs::Client;
+    /// # async fn example(client: &Client) {
+    /// let flags = client.get_multiple(&["feature-1", "feature-2", "feature-3"]).await;
+    /// for (name, enabled) in flags {
+    ///     println!("{}: {}", name, enabled);
+    /// }
+    /// # }
+    /// ```
+    pub async fn get_multiple(&self, names: &[&str]) -> HashMap<String, bool> {
+        // Ensure cache is refreshed if needed (only once for all flags)
+        if self.cache.read().await.should_refresh_cache().await {
+            if self.refresh_in_progress.compare_exchange(
+                false, 
+                true, 
+                Ordering::SeqCst, 
+                Ordering::SeqCst
+            ).is_ok() {
                 if let Err(e) = self.refetch().await {
-                    error!("Failed to refetch flags for list: {}", e);
-                    // Continue with potentially stale cache data if refetch fails
+                    error!("Failed to refetch flags for batch operation: {}", e);
+                    self.handle_error(&e);
+                }
+                self.refresh_in_progress.store(false, Ordering::SeqCst);
+            }
+        }
+
+        // Now get all flags with a single cache lock
+        let cache = self.cache.read().await;
+        let mut results = HashMap::with_capacity(names.len());
+        
+        for &name in names {
+            let normalized_name = name.to_lowercase();
+            match cache.get(&normalized_name).await {
+                Ok((enabled, exists)) => {
+                    results.insert(name.to_string(), exists && enabled);
+                }
+                Err(_) => {
+                    results.insert(name.to_string(), false);
                 }
             }
+        }
+        
+        results
+    }
+    
+    /// Check if all of the specified flags are enabled.
+    /// 
+    /// # Example
+    /// ```no_run
+    /// # use flags_rs::Client;
+    /// # async fn example(client: &Client) {
+    /// if client.all_enabled(&["feature-1", "feature-2"]).await {
+    ///     // Both features are enabled
+    /// }
+    /// # }
+    /// ```
+    pub async fn all_enabled(&self, names: &[&str]) -> bool {
+        if names.is_empty() {
+            return true;
+        }
+        
+        let flags = self.get_multiple(names).await;
+        names.iter().all(|&name| flags.get(name).copied().unwrap_or(false))
+    }
+    
+    /// Check if any of the specified flags are enabled.
+    /// 
+    /// # Example
+    /// ```no_run
+    /// # use flags_rs::Client;
+    /// # async fn example(client: &Client) {
+    /// if client.any_enabled(&["premium-feature", "beta-feature"]).await {
+    ///     // At least one feature is enabled
+    /// }
+    /// # }
+    /// ```
+    pub async fn any_enabled(&self, names: &[&str]) -> bool {
+        if names.is_empty() {
+            return false;
+        }
+        
+        let flags = self.get_multiple(names).await;
+        names.iter().any(|&name| flags.get(name).copied().unwrap_or(false))
+    }
+
+    pub async fn list(&self) -> Result<Vec<flag::FeatureFlag>, FlagError> {
+        // Check if cache needs refresh and ensure only one refresh happens
+        if self.cache.read().await.should_refresh_cache().await {
+            // Try to acquire the refresh lock
+            if self.refresh_in_progress.compare_exchange(
+                false, 
+                true, 
+                Ordering::SeqCst, 
+                Ordering::SeqCst
+            ).is_ok() {
+                // We got the lock, perform the refresh
+                if let Err(e) = self.refetch().await {
+                    error!("Failed to refetch flags for list: {}", e);
+                    self.handle_error(&e);
+                }
+                // Release the refresh lock
+                self.refresh_in_progress.store(false, Ordering::SeqCst);
+            }
+            // If we didn't get the lock, another thread is refreshing
         }
 
         let cache = self.cache.read().await;
@@ -118,16 +228,24 @@ impl Client {
     async fn is_enabled(&self, name: &str) -> bool {
         let name = name.to_lowercase();
 
-        // Check if cache needs refresh
-        {
-            let cache = self.cache.read().await;
-            if cache.should_refresh_cache().await {
-                drop(cache); // Release the read lock before acquiring write lock
+        // Check if cache needs refresh and ensure only one refresh happens
+        if self.cache.read().await.should_refresh_cache().await {
+            // Try to acquire the refresh lock
+            if self.refresh_in_progress.compare_exchange(
+                false, 
+                true, 
+                Ordering::SeqCst, 
+                Ordering::SeqCst
+            ).is_ok() {
+                // We got the lock, perform the refresh
                 if let Err(e) = self.refetch().await {
                     error!("Failed to refetch flags: {}", e);
-                    // If refetch fails, continue to check the potentially stale cache.
+                    self.handle_error(&e);
                 }
+                // Release the refresh lock
+                self.refresh_in_progress.store(false, Ordering::SeqCst);
             }
+            // If we didn't get the lock, another thread is refreshing
         }
 
         // Check cache (which now contains combined API and local flags with overrides)
@@ -150,23 +268,16 @@ impl Client {
             None => return Err(FlagError::AuthError("Authentication is required".to_string())),
         };
 
-        if auth.project_id.is_empty() {
-            return Err(FlagError::AuthError("Project ID is required".to_string()));
-        }
-        if auth.agent_id.is_empty() {
-            return Err(FlagError::AuthError("Agent ID is required".to_string()));
-        }
-        if auth.environment_id.is_empty() {
-            return Err(FlagError::AuthError("Environment ID is required".to_string()));
-        }
-
         let mut headers = HeaderMap::new();
         headers.insert("User-Agent", HeaderValue::from_static("Flags-Rust"));
         headers.insert("Accept", HeaderValue::from_static("application/json"));
         headers.insert("Content-Type", HeaderValue::from_static("application/json"));
-        headers.insert("X-Project-ID", HeaderValue::from_str(&auth.project_id).unwrap());
-        headers.insert("X-Agent-ID", HeaderValue::from_str(&auth.agent_id).unwrap());
-        headers.insert("X-Environment-ID", HeaderValue::from_str(&auth.environment_id).unwrap());
+        headers.insert("X-Project-ID", HeaderValue::from_str(&auth.project_id)
+            .map_err(|_| FlagError::AuthError(format!("Invalid project ID: {}", auth.project_id)))?);
+        headers.insert("X-Agent-ID", HeaderValue::from_str(&auth.agent_id)
+            .map_err(|_| FlagError::AuthError(format!("Invalid agent ID: {}", auth.agent_id)))?);
+        headers.insert("X-Environment-ID", HeaderValue::from_str(&auth.environment_id)
+            .map_err(|_| FlagError::AuthError(format!("Invalid environment ID: {}", auth.environment_id)))?);
 
         let url = format!("{}/flags", self.base_url);
         let response = self.http_client
@@ -221,6 +332,7 @@ impl Client {
                 } else {
                     warn!("Refetch failed (attempt {}/{}), retrying: {}", circuit_state.failure_count, self.max_retries, e);
                 }
+                self.handle_error(&e);
                 drop(circuit_state); // Release the write lock
                 // If fetching fails, we should still attempt to use local flags and potentially old cache data
                 let local_flags = build_local(); // Build local flags even on API failure
@@ -280,6 +392,8 @@ impl Clone for Client {
             max_retries: self.max_retries,
             circuit_state: Arc::clone(&self.circuit_state),
             auth: self.auth.clone(),
+            refresh_in_progress: Arc::clone(&self.refresh_in_progress),
+            error_callback: self.error_callback.clone(),
         }
     }
 }
@@ -296,6 +410,7 @@ pub struct ClientBuilder {
     auth: Option<Auth>,
     use_memory_cache: bool,
     file_name: Option<String>,
+    error_callback: Option<ErrorCallback>,
 }
 
 impl ClientBuilder {
@@ -306,7 +421,29 @@ impl ClientBuilder {
             auth: None,
             use_memory_cache: false,
             file_name: None,
+            error_callback: None,
         }
+    }
+    
+    /// Set a callback function that will be called whenever an error occurs.
+    /// This is useful for logging, monitoring, or custom error handling.
+    /// 
+    /// # Example
+    /// ```no_run
+    /// # use flags_rs::{Client, FlagError};
+    /// let client = Client::builder()
+    ///     .with_error_callback(|error| {
+    ///         eprintln!("Flag error occurred: {}", error);
+    ///         // Send to monitoring service, etc.
+    ///     })
+    ///     .build();
+    /// ```
+    pub fn with_error_callback<F>(mut self, callback: F) -> Self 
+    where
+        F: Fn(&FlagError) + Send + Sync + 'static,
+    {
+        self.error_callback = Some(Arc::new(callback));
+        self
     }
 
     pub fn with_base_url(mut self, base_url: &str) -> Self {
@@ -334,15 +471,40 @@ impl ClientBuilder {
         self
     }
 
-    pub fn build(self) -> Client {
+    pub fn build(self) -> Result<Client, FlagError> {
+        // Validate auth if provided
+        if let Some(ref auth) = self.auth {
+            if auth.project_id.trim().is_empty() {
+                return Err(FlagError::BuilderError("Project ID cannot be empty".to_string()));
+            }
+            if auth.agent_id.trim().is_empty() {
+                return Err(FlagError::BuilderError("Agent ID cannot be empty".to_string()));
+            }
+            if auth.environment_id.trim().is_empty() {
+                return Err(FlagError::BuilderError("Environment ID cannot be empty".to_string()));
+            }
+        }
+
+        // Validate base URL
+        if self.base_url.trim().is_empty() {
+            return Err(FlagError::BuilderError("Base URL cannot be empty".to_string()));
+        }
+
+        // Validate max retries is reasonable
+        if self.max_retries > 10 {
+            return Err(FlagError::BuilderError("Max retries cannot exceed 10".to_string()));
+        }
+
         let cache: Box<dyn Cache + Send + Sync> = Box::new(MemoryCache::new());
 
-        Client {
+        let http_client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(10))
+            .build()
+            .map_err(|e| FlagError::BuilderError(format!("Failed to build HTTP client: {}", e)))?;
+
+        Ok(Client {
             base_url: self.base_url,
-            http_client: reqwest::Client::builder()
-                .timeout(Duration::from_secs(10))
-                .build()
-                .unwrap(),
+            http_client,
             cache: Arc::new(RwLock::new(cache)),
             max_retries: self.max_retries,
             circuit_state: Arc::new(RwLock::new(CircuitState {
@@ -351,7 +513,9 @@ impl ClientBuilder {
                 last_failure: None,
             })),
             auth: self.auth,
-        }
+            refresh_in_progress: Arc::new(AtomicBool::new(false)),
+            error_callback: self.error_callback,
+        })
     }
 }
 
