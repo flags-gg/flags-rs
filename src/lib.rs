@@ -16,6 +16,12 @@ pub mod cache;
 pub mod flag;
 mod tests;
 
+#[cfg(feature = "tower-middleware")]
+pub mod middleware;
+
+#[cfg(all(test, feature = "tower-middleware"))]
+mod middleware_tests;
+
 use crate::cache::{Cache, CacheSystem, MemoryCache};
 use crate::flag::{Details, FeatureFlag};
 

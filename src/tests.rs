@@ -7,7 +7,6 @@ mod tests {
     use wiremock::{Mock, MockServer, ResponseTemplate};
     use wiremock::matchers::{method, path};
 
-    use super::*;
     use crate::cache::{Cache, MemoryCache};
     use crate::{Auth, Client};
     use crate::flag::FeatureFlag;
