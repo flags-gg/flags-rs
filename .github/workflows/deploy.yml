@@ -1,0 +1,33 @@
+name: Deploy
+
+on:
+  workflow_dispatch:
+  release:
+    types:
+      - published
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+      - uses: keloran/version-bump@main
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo test --all-features
+  cargo:
+    needs:
+      - test
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+      - uses: keloran/version-bump@main
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo publish --all-features --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
