@@ -30,7 +30,7 @@ http-body-util = { version = "0.1", optional = true }
 mockito = "1.7.0"
 tempfile = "3.21.0"
 tokio = { version = "1", features = ["full", "test-util", "sync"] }
-wiremock = "0.6.4"
+wiremock = "0.6.5"
 serial_test = "3.2.0"
 tower = { version = "0.5" }
 http = "1.0"
