@@ -22,7 +22,7 @@ serde_json = "1.0.145"
 tower = { version = "0.5", optional = true }
 pin-project = { version = "1", optional = true }
 futures = { version = "0.3", optional = true }
-http = { version = "1.0", optional = true }
+http = { version = "1.4", optional = true }
 http-body = { version = "1.0", optional = true }
 http-body-util = { version = "0.1", optional = true }
 
@@ -33,7 +33,7 @@ tokio = { version = "1", features = ["full", "test-util", "sync"] }
 wiremock = "0.6.5"
 serial_test = "3.2.0"
 tower = { version = "0.5" }
-http = "1.0"
+http = "1.4"
 http-body-util = "0.1"
 bytes = "1.11"
 env_logger = "0.11"
