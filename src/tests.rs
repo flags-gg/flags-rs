@@ -27,6 +27,16 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_client_no_ids() {
+        let client = Client::builder()
+        .with_memory_cache()
+        .build()
+        .expect("Failed to build client");
+
+        assert_eq!(client.max_retries, 3)
+    }
+
+    #[tokio::test]
     async fn test_client_initialization() {
         let client = Client::builder()
             .with_base_url("https://test-api.example.com")
