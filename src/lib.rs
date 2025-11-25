@@ -102,7 +102,7 @@ impl Client {
         )
     }
 
-    pub fn is(&self, name: &str) -> Flag {
+    pub fn is(&self, name: &str) -> Flag<'_> {
         Flag {
             name: name.to_string(),
             client: self,
@@ -330,7 +330,6 @@ impl Client {
 
         // Implement retry logic for fetching flags from the API.
         // Internal retries should not immediately affect the circuit breaker state.
-        let mut last_err: Option<FlagError> = None;
         let api_resp = {
             let max = self.max_retries.max(1);
             let mut attempt: u32 = 1;
@@ -342,10 +341,9 @@ impl Client {
                         break resp;
                     }
                     Err(e) => {
-                        last_err = Some(e);
                         if attempt < max {
                             warn!("Refetch failed (attempt {}/{}), retrying...", attempt, max);
-                            if let Some(ref err) = last_err { self.handle_error(err); }
+                            self.handle_error(&e);
                             tokio::time::sleep(Duration::from_millis(100 * attempt as u64)).await;
                             attempt += 1;
                             continue;
@@ -359,10 +357,8 @@ impl Client {
                             // This preserves behavior expected by tests and avoids aggressive tripping
                             // of the circuit breaker on transient errors.
                         }
-                        if let Some(ref err) = last_err {
-                            error!("Refetch failed after {} internal retries: {}", max, err);
-                            self.handle_error(err);
-                        }
+                        error!("Refetch failed after {} internal retries: {}", max, e);
+                        self.handle_error(&e);
                         drop(cs);
                         // Refresh with local flags to ensure deterministic behavior
                         let local_flags = build_local();
@@ -372,7 +368,7 @@ impl Client {
                             .await
                             .map_err(|e| FlagError::CacheError(e.to_string()))?;
                         // Propagate the last error
-                        return Err(last_err.unwrap());
+                        return Err(e);
                     }
                 }
             }
