@@ -27,7 +27,7 @@ http-body = { version = "1.0", optional = true }
 http-body-util = { version = "0.1", optional = true }
 
 [dev-dependencies]
-mockito = "1.7.0"
+mockito = "1.7.1"
 tempfile = "3.23.0"
 tokio = { version = "1", features = ["full", "test-util", "sync"] }
 wiremock = "0.6.5"
