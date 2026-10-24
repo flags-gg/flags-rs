@@ -60,7 +60,8 @@ impl Cache for MemoryCache {
             flag_map.insert(flag.details.name.clone(), flag.clone());
         }
 
-        self.cache_ttl = interval_allowed as i64;
+        // Never allow a non-positive TTL, which would refresh on every check
+        self.cache_ttl = if interval_allowed > 0 { interval_allowed as i64 } else { 60 };
         let mut next_refresh = self.next_refresh.write().await;
         *next_refresh = Utc::now() + chrono::Duration::seconds(self.cache_ttl);
 

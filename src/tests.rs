@@ -249,9 +249,9 @@ mod tests {
         let enabled = client.is("circuit-test-flag").enabled().await;
         assert!(!enabled);
 
-        // Verify circuit is open
+        // Verify circuit is open after retries are exhausted
         let circuit_state = client.circuit_state.read().await;
-        assert!(!circuit_state.is_open);
+        assert!(circuit_state.is_open);
     }
 
     #[tokio::test]
@@ -316,7 +316,7 @@ mod tests {
         let error_count_clone = Arc::clone(&error_count);
 
         let client = Client::builder()
-            .with_base_url("http://invalid-url-that-will-fail")
+            .with_base_url("http://127.0.0.1:1")
             .with_auth(Auth {
                 project_id: "test-project".to_string(),
                 agent_id: "test-agent".to_string(),
@@ -372,5 +372,127 @@ mod tests {
 
         // Test cache refresh timing
         assert!(!cache.should_refresh_cache().await);
+    }
+
+    fn single_flag_body(enabled: bool) -> serde_json::Value {
+        serde_json::json!({
+            "intervalAllowed": 60,
+            "flags": [{"enabled": enabled, "details": {"name": "test-flag", "id": "1"}}]
+        })
+    }
+
+    #[tokio::test]
+    async fn test_cancelled_refresh_does_not_block_future_refreshes() {
+        use std::sync::atomic::Ordering;
+
+        let mock_server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/flags"))
+            .respond_with(ResponseTemplate::new(200)
+                .set_body_json(single_flag_body(true))
+                .set_delay(Duration::from_secs(5)))
+            .mount(&mock_server)
+            .await;
+
+        let client = create_test_client(&mock_server).await;
+
+        // Drop the refresh future mid-flight
+        let res = tokio::time::timeout(Duration::from_millis(200), client.is("test-flag").enabled()).await;
+        assert!(res.is_err());
+        assert!(!client.refresh_in_progress.load(Ordering::SeqCst));
+
+        // A later refresh must still run
+        mock_server.reset().await;
+        Mock::given(method("GET"))
+            .and(path("/flags"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(single_flag_body(true)))
+            .mount(&mock_server)
+            .await;
+        assert!(client.is("test-flag").enabled().await);
+    }
+
+    #[tokio::test]
+    async fn test_failure_keeps_last_known_good_and_opens_circuit() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/flags"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(single_flag_body(false)))
+            .mount(&mock_server)
+            .await;
+
+        let client = create_test_client(&mock_server).await;
+        client.refetch().await.unwrap();
+        assert!(!client.is("test-flag").enabled().await);
+
+        mock_server.reset().await;
+        Mock::given(method("GET"))
+            .and(path("/flags"))
+            .respond_with(ResponseTemplate::new(500))
+            .mount(&mock_server)
+            .await;
+
+        assert!(client.refetch().await.is_err());
+        let requests_after_failure = mock_server.received_requests().await.unwrap().len();
+        assert_eq!(requests_after_failure, 3); // max_retries attempts
+
+        // Last-known-good flag is kept (not replaced by env-only flags)
+        let (enabled, exists) = client.cache.read().await.get("test-flag").await.unwrap();
+        assert!(exists);
+        assert!(!enabled);
+
+        // Circuit is open, so the next refetch does not hit the API
+        assert!(client.circuit_state.read().await.is_open);
+        client.refetch().await.unwrap();
+        assert_eq!(mock_server.received_requests().await.unwrap().len(), requests_after_failure);
+    }
+
+    #[test]
+    fn test_clamp_interval() {
+        assert_eq!(crate::clamp_interval(0), 60);
+        assert_eq!(crate::clamp_interval(-5), 60);
+        assert_eq!(crate::clamp_interval(1), 10);
+        assert_eq!(crate::clamp_interval(300), 300);
+        assert_eq!(crate::clamp_interval(i32::MAX), 3600);
+    }
+
+    #[test]
+    fn test_base_url_requires_https() {
+        let build = |url: &str| Client::builder().with_base_url(url).build();
+        assert!(build("https://api.example.com").is_ok());
+        assert!(build("http://localhost:8080").is_ok());
+        assert!(build("http://127.0.0.1:8080").is_ok());
+        assert!(build("http://[::1]:8080").is_ok());
+        assert!(build("http://api.example.com").is_err());
+        assert!(build("http://localhost.evil.com").is_err());
+        assert!(build("ftp://localhost").is_err());
+        assert!(build("not a url").is_err());
+    }
+
+    #[tokio::test]
+    async fn test_oversized_response_rejected() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/flags"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(vec![b' '; 5 * 1024 * 1024 + 1]))
+            .mount(&mock_server)
+            .await;
+
+        let client = create_test_client(&mock_server).await;
+        match client.fetch_flags().await {
+            Err(crate::FlagError::ApiError(msg)) => assert!(msg.contains("too large")),
+            other => panic!("expected ApiError, got {:?}", other.map(|_| ())),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_ids_redacted_in_debug_output() {
+        let mock_server = MockServer::start().await;
+        let client = create_test_client(&mock_server).await;
+        let auth = client.auth.clone().unwrap();
+        for out in [format!("{:?}", auth), client.debug_info()] {
+            assert!(!out.contains("test-project"));
+            assert!(!out.contains("test-agent"));
+            assert!(!out.contains("test-env"));
+        }
     }
 }

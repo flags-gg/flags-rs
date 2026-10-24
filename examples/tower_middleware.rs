@@ -28,8 +28,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .build()
         .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
 
+    // Echoing flag states back to callers is opt-in: only enable it when
+    // clients are trusted to see which flags are on.
     let flags_layer = FlagsLayer::new(client)
-        .with_header_name("X-Feature-Flags");
+        .with_header_name("X-Feature-Flags")
+        .expose_header(true);
 
     let service = ServiceBuilder::new()
         .layer(flags_layer)

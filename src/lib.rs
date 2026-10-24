@@ -26,12 +26,42 @@ use crate::flag::{Details, FeatureFlag};
 
 const BASE_URL: &str = "https://api.flags.gg";
 const MAX_RETRIES: u32 = 3;
+const CIRCUIT_OPEN_SECS: i64 = 30;
+const MAX_BODY_BYTES: usize = 5 * 1024 * 1024;
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct Auth {
     pub project_id: String,
     pub agent_id: String,
     pub environment_id: String,
+}
+
+impl std::fmt::Debug for Auth {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Auth")
+            .field("project_id", &"[redacted]")
+            .field("agent_id", &"[redacted]")
+            .field("environment_id", &"[redacted]")
+            .finish()
+    }
+}
+
+/// Resets the refresh flag when dropped, so a cancelled refresh can't block future ones.
+struct RefreshGuard<'a>(&'a AtomicBool);
+
+impl Drop for RefreshGuard<'_> {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::SeqCst);
+    }
+}
+
+/// Clamp the server-supplied refresh interval to a sane range.
+fn clamp_interval(secs: i32) -> i32 {
+    if secs <= 0 {
+        60
+    } else {
+        secs.clamp(10, 3600)
+    }
 }
 
 pub struct Flag<'a> {
@@ -125,20 +155,7 @@ impl Client {
     /// ```
     pub async fn get_multiple(&self, names: &[&str]) -> HashMap<String, bool> {
         // Ensure cache is refreshed if needed (only once for all flags)
-        if self.cache.read().await.should_refresh_cache().await {
-            if self.refresh_in_progress.compare_exchange(
-                false, 
-                true, 
-                Ordering::SeqCst, 
-                Ordering::SeqCst
-            ).is_ok() {
-                if let Err(e) = self.refetch().await {
-                    error!("Failed to refetch flags for batch operation: {}", e);
-                    self.handle_error(&e);
-                }
-                self.refresh_in_progress.store(false, Ordering::SeqCst);
-            }
-        }
+        self.refresh_if_needed().await;
 
         // Now get all flags with a single cache lock
         let cache = self.cache.read().await;
@@ -200,25 +217,7 @@ impl Client {
     }
 
     pub async fn list(&self) -> Result<Vec<flag::FeatureFlag>, FlagError> {
-        // Check if cache needs refresh and ensure only one refresh happens
-        if self.cache.read().await.should_refresh_cache().await {
-            // Try to acquire the refresh lock
-            if self.refresh_in_progress.compare_exchange(
-                false, 
-                true, 
-                Ordering::SeqCst, 
-                Ordering::SeqCst
-            ).is_ok() {
-                // We got the lock, perform the refresh
-                if let Err(e) = self.refetch().await {
-                    error!("Failed to refetch flags for list: {}", e);
-                    self.handle_error(&e);
-                }
-                // Release the refresh lock
-                self.refresh_in_progress.store(false, Ordering::SeqCst);
-            }
-            // If we didn't get the lock, another thread is refreshing
-        }
+        self.refresh_if_needed().await;
 
         let cache = self.cache.read().await;
         cache.get_all().await
@@ -228,25 +227,7 @@ impl Client {
     async fn is_enabled(&self, name: &str) -> bool {
         let name = name.to_lowercase();
 
-        // Check if cache needs refresh and ensure only one refresh happens
-        if self.cache.read().await.should_refresh_cache().await {
-            // Try to acquire the refresh lock
-            if self.refresh_in_progress.compare_exchange(
-                false, 
-                true, 
-                Ordering::SeqCst, 
-                Ordering::SeqCst
-            ).is_ok() {
-                // We got the lock, perform the refresh
-                if let Err(e) = self.refetch().await {
-                    error!("Failed to refetch flags: {}", e);
-                    self.handle_error(&e);
-                }
-                // Release the refresh lock
-                self.refresh_in_progress.store(false, Ordering::SeqCst);
-            }
-            // If we didn't get the lock, another thread is refreshing
-        }
+        self.refresh_if_needed().await;
 
         // Check cache (which now contains combined API and local flags with overrides)
         let cache = self.cache.read().await;
@@ -262,6 +243,27 @@ impl Client {
         }
     }
 
+    /// Refresh the cache if it is stale. Only one refresh runs at a time; if another
+    /// caller is already refreshing, this returns immediately and the cache is served as-is.
+    async fn refresh_if_needed(&self) {
+        if !self.cache.read().await.should_refresh_cache().await {
+            return;
+        }
+        if self
+            .refresh_in_progress
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_err()
+        {
+            return;
+        }
+        // Released on drop, including when this future is cancelled mid-refresh.
+        let _guard = RefreshGuard(&self.refresh_in_progress);
+        if let Err(e) = self.refetch().await {
+            error!("Failed to refetch flags: {}", e);
+            self.handle_error(&e);
+        }
+    }
+
     async fn fetch_flags(&self) -> Result<ApiResponse, FlagError> {
         let auth = match &self.auth {
             Some(auth) => auth,
@@ -273,14 +275,14 @@ impl Client {
         headers.insert("Accept", HeaderValue::from_static("application/json"));
         headers.insert("Content-Type", HeaderValue::from_static("application/json"));
         headers.insert("X-Project-ID", HeaderValue::from_str(&auth.project_id)
-            .map_err(|_| FlagError::AuthError(format!("Invalid project ID: {}", auth.project_id)))?);
+            .map_err(|_| FlagError::AuthError("Invalid project ID".to_string()))?);
         headers.insert("X-Agent-ID", HeaderValue::from_str(&auth.agent_id)
-            .map_err(|_| FlagError::AuthError(format!("Invalid agent ID: {}", auth.agent_id)))?);
+            .map_err(|_| FlagError::AuthError("Invalid agent ID".to_string()))?);
         headers.insert("X-Environment-ID", HeaderValue::from_str(&auth.environment_id)
-            .map_err(|_| FlagError::AuthError(format!("Invalid environment ID: {}", auth.environment_id)))?);
+            .map_err(|_| FlagError::AuthError("Invalid environment ID".to_string()))?);
 
         let url = format!("{}/flags", self.base_url);
-        let response = self.http_client
+        let mut response = self.http_client
             .get(&url)
             .headers(headers)
             .send()
@@ -293,7 +295,20 @@ impl Client {
             )));
         }
 
-        let api_resp = response.json::<ApiResponse>().await?;
+        if response.content_length().is_some_and(|len| len > MAX_BODY_BYTES as u64) {
+            return Err(FlagError::ApiError("Response body too large".to_string()));
+        }
+        // Content-Length can be absent or wrong, so enforce the cap while reading too
+        let mut body = Vec::new();
+        while let Some(chunk) = response.chunk().await? {
+            if body.len() + chunk.len() > MAX_BODY_BYTES {
+                return Err(FlagError::ApiError("Response body too large".to_string()));
+            }
+            body.extend_from_slice(&chunk);
+        }
+
+        let api_resp = serde_json::from_slice::<ApiResponse>(&body)
+            .map_err(|e| FlagError::ApiError(format!("Invalid response body: {}", e)))?;
         Ok(api_resp)
     }
 
@@ -316,7 +331,7 @@ impl Client {
             if let Some(last_failure) = circuit_state.last_failure {
                 let now = Utc::now();
                 // Keep the circuit open for a bit after failure
-                if (now - last_failure).num_seconds() < 10 { // You can adjust this duration
+                if (now - last_failure).num_seconds() < CIRCUIT_OPEN_SECS {
                     warn!("Circuit breaker is open, skipping refetch.");
                     return Ok(());
                 }
@@ -338,6 +353,7 @@ impl Client {
                     Ok(resp) => {
                         let mut circuit_state = self.circuit_state.write().await;
                         circuit_state.failure_count = 0; // Reset failure count on success
+                        circuit_state.is_open = false;
                         break resp;
                     }
                     Err(e) => {
@@ -348,25 +364,25 @@ impl Client {
                             attempt += 1;
                             continue;
                         }
-                        // After exhausting attempts, update circuit state once
+                        // All retries exhausted: open the circuit so we back off for
+                        // CIRCUIT_OPEN_SECS instead of hammering the API on every check
                         let mut cs = self.circuit_state.write().await;
                         cs.failure_count += 1;
                         cs.last_failure = Some(Utc::now());
-                        if cs.failure_count >= self.max_retries.max(1) {
-                            // Do not open the circuit on a single refetch cycle; keep soft-fail behavior
-                            // This preserves behavior expected by tests and avoids aggressive tripping
-                            // of the circuit breaker on transient errors.
-                        }
+                        cs.is_open = true;
                         error!("Refetch failed after {} internal retries: {}", max, e);
                         self.handle_error(&e);
                         drop(cs);
-                        // Refresh with local flags to ensure deterministic behavior
-                        let local_flags = build_local();
+                        // Keep the last-known-good flags. Only seed local (env) flags when we
+                        // have never had any, so overrides still work while the API is down.
                         let mut cache = self.cache.write().await;
-                        cache
-                            .refresh(&local_flags, 60)
-                            .await
-                            .map_err(|e| FlagError::CacheError(e.to_string()))?;
+                        let is_empty = cache.get_all().await.map(|f| f.is_empty()).unwrap_or(true);
+                        if is_empty {
+                            cache
+                                .refresh(&build_local(), 60)
+                                .await
+                                .map_err(|e| FlagError::CacheError(e.to_string()))?;
+                        }
                         // Propagate the last error
                         return Err(e);
                     }
@@ -406,7 +422,7 @@ impl Client {
 
 
         let mut cache = self.cache.write().await;
-        cache.refresh(&combined_flags, api_resp.interval_allowed).await
+        cache.refresh(&combined_flags, clamp_interval(api_resp.interval_allowed)).await
             .map_err(|e| FlagError::CacheError(e.to_string()))?;
 
         Ok(())
@@ -439,7 +455,6 @@ pub struct ClientBuilder {
     max_retries: u32,
     auth: Option<Auth>,
     use_memory_cache: bool,
-    file_name: Option<String>,
     error_callback: Option<ErrorCallback>,
 }
 
@@ -450,7 +465,6 @@ impl ClientBuilder {
             max_retries: MAX_RETRIES,
             auth: None,
             use_memory_cache: false,
-            file_name: None,
             error_callback: None,
         }
     }
@@ -491,8 +505,8 @@ impl ClientBuilder {
         self
     }
 
-    pub fn with_file_name(mut self, file_name: &str) -> Self {
-        self.file_name = Some(file_name.to_string());
+    #[deprecated(note = "file-based caching is not implemented; this setting has no effect")]
+    pub fn with_file_name(self, _file_name: &str) -> Self {
         self
     }
 
@@ -518,6 +532,14 @@ impl ClientBuilder {
         // Validate base URL
         if self.base_url.trim().is_empty() {
             return Err(FlagError::BuilderError("Base URL cannot be empty".to_string()));
+        }
+        let url = reqwest::Url::parse(&self.base_url)
+            .map_err(|e| FlagError::BuilderError(format!("Invalid base URL: {}", e)))?;
+        let is_local = matches!(url.host_str(), Some("localhost" | "127.0.0.1" | "[::1]"));
+        if url.scheme() != "https" && !(url.scheme() == "http" && is_local) {
+            return Err(FlagError::BuilderError(
+                "Base URL must use https (http is only allowed for localhost)".to_string(),
+            ));
         }
 
         // Validate max retries is reasonable

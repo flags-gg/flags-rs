@@ -63,6 +63,7 @@ mod tests {
             .and(path("/flags"))
             .and(header("x-project-id", "test-project"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "intervalAllowed": 60,
                 "flags": [
                     {
                         "enabled": true,
@@ -96,7 +97,7 @@ mod tests {
         let _ = client.is("feature-1").enabled().await;
 
         let service = ServiceBuilder::new()
-            .layer(FlagsLayer::new(client))
+            .layer(FlagsLayer::new(client).expose_header(true))
             .service_fn(|_req: Request<Empty<Bytes>>| async move {
                 Ok::<_, Infallible>(Response::new(Full::new(Bytes::new())))
             });
@@ -110,8 +111,7 @@ mod tests {
         let response = service.oneshot(request).await.unwrap();
         
         let enabled_flags = response.headers().get("X-Enabled-Flags");
-        // For now, just check that the header wasn't added since no flags are enabled
-        assert!(enabled_flags.is_none());
+        assert_eq!(enabled_flags.unwrap(), "feature-1,feature-3");
     }
 
     #[tokio::test]
@@ -122,6 +122,7 @@ mod tests {
             .and(path("/flags"))
             .and(header("x-project-id", "test-project"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "intervalAllowed": 60,
                 "flags": [
                     {
                         "enabled": true,
@@ -141,7 +142,7 @@ mod tests {
         let _ = client.is("test-flag").enabled().await;
 
         let service = ServiceBuilder::new()
-            .layer(FlagsLayer::new(client).with_header_name("Custom-Flags"))
+            .layer(FlagsLayer::new(client).with_header_name("Custom-Flags").expose_header(true))
             .service_fn(|_req: Request<Empty<Bytes>>| async move {
                 Ok::<_, Infallible>(Response::new(Full::new(Bytes::new())))
             });
@@ -155,14 +156,13 @@ mod tests {
         let response = service.oneshot(request).await.unwrap();
         
         let enabled_flags = response.headers().get("X-Enabled-Flags");
-        // For now, just check that the header wasn't added since no flags are enabled
-        assert!(enabled_flags.is_none());
+        assert_eq!(enabled_flags.unwrap(), "test-flag");
     }
 
     #[tokio::test]
     async fn test_middleware_continues_on_flag_check_error() {
         let client = Client::builder()
-            .with_base_url("http://invalid-url")
+            .with_base_url("http://127.0.0.1:1")
             .with_auth(crate::Auth {
                 project_id: "test-project".to_string(),
                 agent_id: "test-agent".to_string(),
@@ -172,7 +172,7 @@ mod tests {
             .expect("Failed to build test client");
 
         let service = ServiceBuilder::new()
-            .layer(FlagsLayer::new(client))
+            .layer(FlagsLayer::new(client).expose_header(true))
             .service_fn(|_req: Request<Empty<Bytes>>| async move {
                 Ok::<_, Infallible>(Response::builder()
                     .status(StatusCode::OK)
@@ -220,5 +220,91 @@ mod tests {
 
         let response = service.oneshot(request).await.unwrap();
         assert!(response.headers().get("X-Enabled-Flags").is_none());
+    }
+
+    async fn client_with_flags(server: &MockServer, names: &[String]) -> Client {
+        let flags: Vec<_> = names
+            .iter()
+            .map(|n| serde_json::json!({"enabled": true, "details": {"name": n, "id": n}}))
+            .collect();
+        Mock::given(method("GET"))
+            .and(path("/flags"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "intervalAllowed": 60,
+                "flags": flags
+            })))
+            .mount(server)
+            .await;
+        let client = create_test_client(server).await;
+        let _ = client.list().await;
+        client
+    }
+
+    #[tokio::test]
+    async fn test_header_not_evaluated_by_default() {
+        let mock_server = setup_mock_server().await;
+        let client = client_with_flags(&mock_server, &["feature-1".to_string()]).await;
+
+        let service = ServiceBuilder::new()
+            .layer(FlagsLayer::new(client))
+            .service_fn(|req: Request<Empty<Bytes>>| async move {
+                assert!(req.flags_client().is_some());
+                Ok::<_, Infallible>(Response::new(Full::new(Bytes::new())))
+            });
+
+        let request = Request::builder()
+            .uri("/")
+            .header("X-Feature-Flags", "feature-1")
+            .body(Empty::new())
+            .unwrap();
+
+        let response = service.oneshot(request).await.unwrap();
+        assert!(response.headers().get("X-Enabled-Flags").is_none());
+    }
+
+    #[tokio::test]
+    async fn test_header_flag_names_capped() {
+        let mock_server = setup_mock_server().await;
+        let names: Vec<String> = (0..60).map(|i| format!("f{}", i)).collect();
+        let client = client_with_flags(&mock_server, &names).await;
+
+        let service = ServiceBuilder::new()
+            .layer(FlagsLayer::new(client).expose_header(true))
+            .service_fn(|_req: Request<Empty<Bytes>>| async move {
+                Ok::<_, Infallible>(Response::new(Full::new(Bytes::new())))
+            });
+
+        let request = Request::builder()
+            .uri("/")
+            .header("X-Feature-Flags", names.join(","))
+            .body(Empty::new())
+            .unwrap();
+
+        let response = service.oneshot(request).await.unwrap();
+        let echoed = response.headers().get("X-Enabled-Flags").unwrap().to_str().unwrap();
+        assert_eq!(echoed.split(',').count(), 50);
+    }
+
+    #[tokio::test]
+    async fn test_header_kept_when_inner_service_is_pending() {
+        let mock_server = setup_mock_server().await;
+        let client = client_with_flags(&mock_server, &["feature-1".to_string()]).await;
+
+        let service = ServiceBuilder::new()
+            .layer(FlagsLayer::new(client).expose_header(true))
+            .service_fn(|_req: Request<Empty<Bytes>>| async move {
+                // Return Pending at least once after the flags have resolved
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                Ok::<_, Infallible>(Response::new(Full::new(Bytes::new())))
+            });
+
+        let request = Request::builder()
+            .uri("/")
+            .header("X-Feature-Flags", "feature-1")
+            .body(Empty::new())
+            .unwrap();
+
+        let response = service.oneshot(request).await.unwrap();
+        assert_eq!(response.headers().get("X-Enabled-Flags").unwrap(), "feature-1");
     }
 }

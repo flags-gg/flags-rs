@@ -8,10 +8,20 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 use tower::{Layer, Service};
 
+/// Maximum number of flag names evaluated from a single request header.
+const MAX_HEADER_FLAGS: usize = 50;
+
+/// Adds the flags [`Client`] to every request's extensions (see [`RequestExt`]).
+///
+/// Optionally, with [`FlagsLayer::expose_header`], it evaluates the flag names a caller
+/// lists in the request header (`X-Feature-Flags` by default) and echoes the enabled
+/// ones back in the `X-Enabled-Flags` response header. This is off by default because
+/// it lets any client probe your flag states.
 #[derive(Clone)]
 pub struct FlagsLayer {
     client: Arc<Client>,
     header_name: String,
+    expose_header: bool,
 }
 
 impl FlagsLayer {
@@ -19,11 +29,19 @@ impl FlagsLayer {
         Self {
             client: Arc::new(client),
             header_name: "X-Feature-Flags".to_string(),
+            expose_header: false,
         }
     }
 
     pub fn with_header_name(mut self, name: impl Into<String>) -> Self {
         self.header_name = name.into();
+        self
+    }
+
+    /// Evaluate flags named in the request header and echo the enabled ones in
+    /// `X-Enabled-Flags`. Off by default; at most 50 names are evaluated per request.
+    pub fn expose_header(mut self, enabled: bool) -> Self {
+        self.expose_header = enabled;
         self
     }
 }
@@ -36,6 +54,7 @@ impl<S> Layer<S> for FlagsLayer {
             inner,
             client: self.client.clone(),
             header_name: self.header_name.clone(),
+            expose_header: self.expose_header,
         }
     }
 }
@@ -45,6 +64,7 @@ pub struct FlagsMiddleware<S> {
     inner: S,
     client: Arc<Client>,
     header_name: String,
+    expose_header: bool,
 }
 
 #[pin_project]
@@ -54,6 +74,7 @@ pub struct FlagsFuture<F, B> {
     client: Arc<Client>,
     header_name: String,
     flags_future: Option<BoxFuture<'static, Result<Vec<String>, FlagError>>>,
+    enabled_flags: Vec<String>,
     _phantom: std::marker::PhantomData<B>,
 }
 
@@ -74,11 +95,21 @@ where
     }
 
     fn call(&mut self, mut req: Request<ReqBody>) -> Self::Future {
-        let flags_from_header = req
-            .headers()
-            .get(&self.header_name)
-            .and_then(|v| v.to_str().ok())
-            .map(|s| s.split(',').map(|f| f.trim().to_string()).collect::<Vec<_>>());
+        let flags_from_header = if self.expose_header {
+            req.headers()
+                .get(&self.header_name)
+                .and_then(|v| v.to_str().ok())
+                .map(|s| {
+                    s.split(',')
+                        .map(|f| f.trim())
+                        .filter(|f| !f.is_empty())
+                        .take(MAX_HEADER_FLAGS)
+                        .map(|f| f.to_string())
+                        .collect::<Vec<_>>()
+                })
+        } else {
+            None
+        };
 
         let client = self.client.clone();
         let flags_future = if let Some(flags) = flags_from_header {
@@ -107,6 +138,7 @@ where
             client: self.client.clone(),
             header_name: self.header_name.clone(),
             flags_future,
+            enabled_flags: Vec::new(),
             _phantom: std::marker::PhantomData,
         }
     }
@@ -122,40 +154,29 @@ where
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let this = self.project();
 
-        // If we have flags to check, we need to wait for them first
+        // Resolve the requested flags first, keeping the result so it survives
+        // the inner service returning Pending on later polls
         if let Some(flags_future) = this.flags_future.as_mut() {
             match flags_future.as_mut().poll(cx) {
-                Poll::Ready(Ok(enabled_flags)) => {
-                    *this.flags_future = None;
-                    
-                    // Now poll the inner service
-                    match this.inner.poll(cx) {
-                        Poll::Ready(Ok(mut response)) => {
-                            if !enabled_flags.is_empty() {
-                                // Only add header if we can create a valid HeaderValue
-                                if let Ok(header_value) = enabled_flags.join(",").parse() {
-                                    response.headers_mut().insert(
-                                        "X-Enabled-Flags",
-                                        header_value,
-                                    );
-                                }
-                                // If parsing fails, we still return the response without the header
-                            }
-                            Poll::Ready(Ok(response))
-                        }
-                        Poll::Ready(Err(e)) => Poll::Ready(Err(e)),
-                        Poll::Pending => Poll::Pending,
+                Poll::Pending => return Poll::Pending,
+                Poll::Ready(Ok(enabled_flags)) => *this.enabled_flags = enabled_flags,
+                // Continue without flags on error
+                Poll::Ready(Err(_)) => {}
+            }
+            *this.flags_future = None;
+        }
+
+        match this.inner.poll(cx) {
+            Poll::Ready(Ok(mut response)) => {
+                if !this.enabled_flags.is_empty() {
+                    // Only add header if we can create a valid HeaderValue
+                    if let Ok(header_value) = this.enabled_flags.join(",").parse() {
+                        response.headers_mut().insert("X-Enabled-Flags", header_value);
                     }
                 }
-                Poll::Ready(Err(_)) => {
-                    *this.flags_future = None;
-                    // Continue without flags on error
-                    this.inner.poll(cx)
-                }
-                Poll::Pending => Poll::Pending,
+                Poll::Ready(Ok(response))
             }
-        } else {
-            this.inner.poll(cx)
+            other => other,
         }
     }
 }

@@ -11,12 +11,12 @@ jobs:
     runs-on: ubuntu-latest
     environment: production
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           persist-credentials: false
           fetch-depth: 1
-      - uses: keloran/version-bump@main
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: keloran/version-bump@c25548abe32c78adac98a4786e821cf3cf0990d2 # main
+      - uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable
       - run: cargo test --all-features
   cargo:
     needs:
@@ -24,10 +24,13 @@ jobs:
     runs-on: ubuntu-latest
     environment: production
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           persist-credentials: false
           fetch-depth: 1
-      - uses: keloran/version-bump@main
-      - uses: dtolnay/rust-toolchain@stable
-      - run: cargo publish --all-features --token ${{ secrets.CARGO_REGISTRY_TOKEN }} --allow-dirty
+      - uses: keloran/version-bump@c25548abe32c78adac98a4786e821cf3cf0990d2 # main
+      - uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable
+      # --allow-dirty: version-bump rewrites Cargo.toml's version without committing it
+      - run: cargo publish --all-features --allow-dirty
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
